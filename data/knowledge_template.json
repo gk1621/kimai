@@ -1,0 +1,296 @@
+{
+  "version": "1.1",
+  "generated_at": "2025-09-11T20:35:00Z",
+  "purpose": "Voice agent knowledge for law firm intake & lead qualification using ElevenLabs + Twilio. Single-file schema for deterministic call handling and data capture.",
+  "global_policies": {
+    "disclaimer": [
+      "This call is for information collection only and does not create an attorney–client relationship.",
+      "Do not provide legal advice. If asked, say: 'I’m not a lawyer and can’t provide legal advice. I’m here to collect information so an attorney can review your matter.'"
+    ],
+    "pii_security": [
+      "Read back sensitive data to confirm accuracy (legal name, DOB, email, phone).",
+      "Never store full SSN; if provided, truncate to last 4.",
+      "Confirm permission before collecting third-party information."
+    ],
+    "triage_priority_rules": [
+      "Matters inside statute of limitations (SOL) windows are prioritized.",
+      "Serious injuries, surgeries, hospitalizations, or ongoing criminal exposure are escalated to urgent review."
+    ],
+    "handoff_protocol": {
+      "criteria": [
+        "Caller appears within SOL window and facts align with an accepted scenario.",
+        "Medical records, police reports, or written complaints exist or can be obtained quickly.",
+        "Employment claims within 90 days for Whistleblower or within 3 years for other employment claims."
+      ],
+      "action": "Offer to schedule consult or connect to on-call intake specialist; email transcript & JSON to CRM endpoint."
+    }
+  },
+  "core_call_flow": [
+    { "id": "greeting", "say": "Thank you for calling. I can help with a brief intake to see if our firm can assist. Is now a good time to proceed?" },
+    { "id": "consent", "say": "I’ll ask a few questions to understand your situation. This is not legal advice and does not form an attorney–client relationship. May I continue?" },
+    {
+      "id": "contact_capture",
+      "collect": [
+        "full_name",
+        "best_phone",
+        "email",
+        "mailing_address",
+        "dob",
+        "referral_source"
+      ],
+      "conditional_collect": {
+        "trigger_logic": "alt_contact_required == true",
+        "fields": ["alt_contact_name","alt_contact_relation","alt_contact_phone"],
+        "script": "Because you mentioned serious injury or hospitalization, may I get an alternate contact in case we’re unable to reach you?"
+      },
+      "validate": { "email": "email", "best_phone": "phone" }
+    },
+    { "id": "matter_selection", "say": "What type of issue is this about?", "choices": [
+      "Motor Vehicle",
+      "Premises (slip, trip, fall, unsafe condition)",
+      "Animal Attack / Knockdown (e.g., dog bite)",
+      "Bar / Restaurant Liability (bouncer or patron)",
+      "Medical / Dental Malpractice",
+      "Employment (discrimination, harassment, retaliation)",
+      "Whistleblower (reported or intended to report unlawful activity)",
+      "Police Misconduct / Brutality / Excess or Deadly Force / False Arrest"
+    ]},
+    { "id": "timestamp", "collect": ["date_of_incident"], "say": "What was the date of the incident or the most recent related event?" },
+    { "id": "sol_gate", "say": "Thank you. I’ll capture details to confirm timelines and next steps." },
+    { "id": "scenario_branch", "route_by": "matter_type" },
+    { "id": "wrap", "say": "Thanks. I’ll pass this to an attorney for review. Would you like to schedule a time for a call-back?" }
+  ],
+  "decision_logic": {
+    "signals": {
+      "alt_contact_required": "true if caller mentions surgery, hospitalization, coma, severe incapacity, or life-threatening injury; otherwise false"
+    },
+    "sol_calculator": {
+      "inputs": ["scenario","date_of_incident","date_of_discovery_optional"],
+      "outputs": ["sol_deadline_iso","days_remaining","within_window_boolean"],
+      "note": "For Medical/Dental, compute using earlier of 2 years from accrual or discovery logic as captured below; for Motor Vehicle also compute PIP 1-year."
+    },
+    "urgency_index": {
+      "scale": "1-5",
+      "weights": {
+        "injury_severity": 0.4,
+        "sol_proximity": 0.35,
+        "evidence_availability": 0.15,
+        "employment_termination_recent_90d": 0.10
+      },
+      "output": "integer 1..5 with rationale text"
+    },
+    "evidence_tags": ["police_report","photos_or_video","medical_records","witnesses","written_complaint_or_notice"]
+  },
+  "data_model": {
+    "contact_fields": ["full_name","email","best_phone","mailing_address","dob","referral_source","alt_contact_name?","alt_contact_relation?","alt_contact_phone?"],
+    "incident_fields": ["date_of_incident","location","description","injuries","providers","police_report","witnesses","photos_or_video","defendant_info","insurance_info"],
+    "employment_fields": ["employer_name","employer_address","employee_count","hire_date","end_date","job_title","pay_structure","benefits","personnel_file_possession"],
+    "medical_fields": ["initial_reason_for_care","onset_of_problem","first_discussion_with_provider","alleged_error_description","providers_named","opinions_of_error_by_other_providers","records_possession","date_of_discovery_optional"],
+    "litigation_history_fields": ["prior_claims_or_lawsuits","prior_arrests_or_convictions"],
+    "workloss_fields": ["employer_name","supervisor_contact","dates_employed","rate_of_pay","ssd_status","retirement_benefits","workers_comp_info"],
+    "personal_profile_fields": ["dominant_hand","height","weight","corrective_lenses","hearing_status","marital_status","spouse_name_dob","children_names_dobs","pets","home_description","education","hobbies","household_chores"]
+  },
+  "sol_rules": {
+    "Motor Vehicle": {
+      "bodily_injury": { "years": 3, "note": "3-year SOL for third-party bodily injury" },
+      "no_fault_pip": { "years": 1, "note": "1-year SOL for first-party no-fault benefits" }
+    },
+    "Premises": { "years": 3 },
+    "Animal Attack / Knockdown": { "years": 3 },
+    "Bar / Restaurant Liability": { "years": 3 },
+    "Medical / Dental Malpractice": {
+      "years": 2,
+      "discovery_rule_enabled": true,
+      "discovery_questions": [
+        "When did you first suspect a problem from the care you received? (date_of_discovery_optional)",
+        "When did a medical professional first tell you a mistake might have been made? Who and when?"
+      ],
+      "note": "Apply accrual/discovery; escalate if discovery within last 6 months even if incident >2 years."
+    },
+    "Employment": { "years": 3, "usps_special_handling": true },
+    "Whistleblower": { "days": 90, "fallback": { "type": "Wrongful Discharge", "years": 3 } },
+    "Police Misconduct / Brutality / Excess / Deadly Force / False Arrest": { "years": 3 }
+  },
+  "reject_and_escalation_logic": [
+    { "if": { "scenario": "Medical / Dental Malpractice", "beyond_sol": true, "discovery_rule_enabled": true, "discovery_within_6_months": true }, "then": "ESCALATE: attorney review for tolling/discovery." },
+    { "if": { "scenario": "Medical / Dental Malpractice", "beyond_sol": true, "discovery_rule_enabled": true, "discovery_within_6_months": false }, "then": "REJECT: beyond 2-year SOL; provide empathetic close." },
+    { "if": { "scenario": "Bar / Restaurant Liability", "beyond_sol": true }, "then": "REJECT: beyond 3-year SOL." },
+    { "if": { "scenario": "Premises", "beyond_sol": true }, "then": "REJECT: beyond 3-year SOL; note municipal notice if public entity." },
+    { "if": { "scenario": "Animal Attack / Knockdown", "beyond_sol": true }, "then": "REJECT: beyond 3-year SOL." },
+    { "if": { "scenario": "Motor Vehicle", "beyond_sol_bi": true }, "then": "REJECT: beyond 3 years for BI." },
+    { "if": { "scenario": "Motor Vehicle", "beyond_sol_pip": true }, "then": "REJECT: beyond 1 year for PIP; still check BI dimension." },
+    { "if": { "scenario": "Employment", "beyond_sol": true }, "then": "REJECT: beyond 3-year SOL." },
+    { "if": { "scenario": "Whistleblower", "beyond_90_days": true }, "then": "REJECT WPA track; evaluate for wrongful discharge within 3 years." },
+    { "if": { "scenario": "Police Misconduct / Brutality / Excess / Deadly Force / False Arrest", "beyond_sol": true }, "then": "REJECT: beyond 3-year SOL." },
+    { "if": { "scenario": "Police Misconduct / Brutality / Excess / Deadly Force / False Arrest", "criminal_case_pending": true }, "then": "DEFER: cannot accept while criminal case pending; refer to criminal counsel." },
+    { "if": { "scenario": "Police Misconduct / Brutality / Excess / Deadly Force / False Arrest", "plea_or_conviction_for_resisting_or_assaulting_officer": true }, "then": "REJECT: not viable per internal criteria." },
+    { "if": { "scenario": "Police Misconduct / Brutality / Excess / Deadly Force / False Arrest", "false_arrest": true }, "then": "REJECT: firm does not accept false arrest claims; provide empathetic close." },
+    { "if": { "scenario": "Employment", "employer_is_USPS": true }, "then": "ESCALATE: USPS_SPECIAL_HANDLING; continue basic fact collection; show USPS advisory script." }
+  ],
+  "scenarios": {
+    "Medical / Dental Malpractice": {
+      "statute_of_limitations": "2 years (accrual/discovery applied)",
+      "must_collect": [
+        "date_of_incident_or_discovery",
+        "initial_reason_for_care",
+        "onset_of_problem",
+        "first_discussion_with_provider",
+        "alleged_error_description",
+        "providers_named",
+        "opinions_of_error_by_other_providers (who/when/what)",
+        "records_possession",
+        "date_of_discovery_optional"
+      ],
+      "questions": [
+        "Why did you first see the doctor who led to this problem?",
+        "When did you start having a problem?",
+        "When did you first talk to a medical professional about it?",
+        "What harm do you believe resulted (e.g., additional surgery, increased pain, loss of chance)?",
+        "What do you think the doctor(s) did wrong?",
+        "List all hospitals and providers who treated you and those you believe erred (with dates).",
+        "Name, address, and phone of any professional who said a mistake occurred. What did they say, and when?",
+        "Do you have any related medical records?",
+        "When did you first suspect a problem or were told an error occurred? (date_of_discovery_optional)"
+      ],
+      "also_collect_profile": true
+    },
+    "Bar / Restaurant Liability": {
+      "statute_of_limitations": "3 years",
+      "tracks": [
+        {
+          "type": "Bouncer Injury",
+          "questions": [
+            "Bar/restaurant name and address",
+            "Describe how the bouncer injured you",
+            "Was the incident reported to police? Department, report number, charges, outcome"
+          ]
+        },
+        {
+          "type": "Patron/Customer/Guest Injury",
+          "questions": [
+            "Identity of the patron/customer/guest",
+            "Was the patron intoxicated or visibly intoxicated before the incident?",
+            "Was alcohol served to the person while visibly intoxicated?",
+            "Was the person reported to management/staff/security before the incident? How handled? Time between report and incident?",
+            "Was the incident reported to police? Department, report number, charges, outcome"
+          ]
+        }
+      ],
+      "medical_and_background": [
+        "Description of injuries",
+        "All treatment providers and any surgery details",
+        "Pre-existing conditions and prior claims/lawsuits",
+        "Dominant hand"
+      ]
+    },
+    "Premises": {
+      "statute_of_limitations": "3 years (strict municipal notice if public entity involved)",
+      "questions": [
+        "Where did this happen? Provide address and property type.",
+        "When did it happen?",
+        "How did it happen? Include lighting, surface conditions, measurements, and your movements.",
+        "Why were you at the location (shopping, work, visiting)?",
+        "Was anyone with you? Names and numbers.",
+        "Injury description and all providers, surgeries, and insurance.",
+        "Incident report details: preparer name/title, report number; did you sign/receive a copy?",
+        "Witnesses and availability of photos/surveillance; did you see or receive copies?",
+        "Defendant and insurance details; med-pay amount, claim number, adjuster."
+      ],
+      "collect_workloss_and_profile": true
+    },
+    "Animal Attack / Knockdown": {
+      "statute_of_limitations": "3 years",
+      "questions": [
+        "Describe the incident (animal, behavior, location).",
+        "Injuries and medical treatment providers; surgeries and dates.",
+        "Insurance coverages; health insurance present?",
+        "Police/Animal Control involvement: department, report number, officer.",
+        "Witnesses and defendant/owner info; insurer, policy, claim number, med-pay amount."
+      ],
+      "collect_workloss_and_profile": true
+    },
+    "Motor Vehicle": {
+      "statute_of_limitations": "3 years (BI); 1 year (PIP/no-fault)",
+      "questions": [
+        "Do you or anyone in your household have auto insurance? Carrier, policy, claim, UM/UIM limits, medical limit options.",
+        "At-fault driver info and insurer; policy and claim numbers.",
+        "Describe the accident: vehicles, impact, road conditions, citations, EMS transport.",
+        "Police report: department, report number, investigating officer; who was found at fault?",
+        "Injuries, providers, surgeries; pre-existing conditions.",
+        "Employment and wage loss details."
+      ],
+      "fee_note": "33.3% fee for BI; 15% fee for PIP pre-lit; 33.3% if no-fault carrier stops paying and litigation is required."
+    },
+    "Employment": {
+      "statute_of_limitations": "3 years (note USPS exceptions via Rehab Act/FTCA)",
+      "questions": [
+        "Employment status (terminated, quit, or still employed).",
+        "Employer details and employee count; hire and end dates; job title and duties.",
+        "Compensation structure and benefits.",
+        "Adverse action description and dates.",
+        "Employment agreement and personnel file possession.",
+        "Nature of complaint: discrimination, harassment, wrongful termination (details).",
+        "Reporting history: handbook, HR, who received, written vs verbal, copies of reports, employer investigation and findings.",
+        "Retaliation details after reporting; continued harassment.",
+        "Mitigation: current employment feasibility, job search, new employment details."
+      ],
+      "special_handling": "If employer is USPS (United States Postal Service), flag USPS_SPECIAL_HANDLING and show advisory; continue basic fact collection."
+    },
+    "Whistleblower": {
+      "statute_of_limitations": "90 days from adverse action under WPA; if missed, evaluate for 3-year wrongful discharge.",
+      "questions": [
+        "Employment status and employer details; size, hire/end dates, duties, pay, benefits.",
+        "What law/regulation/rule did you report or intend to report?",
+        "What exactly was reported, to which public body/agency, and do you have proof?",
+        "Did the employer learn of the report or intent?",
+        "Adverse actions taken (termination, demotion, pay cut, transfer), with dates.",
+        "Confirm timing within 90 days; if beyond, consider wrongful discharge track."
+      ]
+    },
+    "Police Misconduct / Brutality / Excess or Deadly Force / False Arrest": {
+      "statute_of_limitations": "3 years",
+      "gate_checks": [
+        "Reject if pled guilty/convicted of resisting & obstructing or assaulting an officer.",
+        "Do not accept while underlying criminal case is pending; refer to criminal counsel.",
+        "Reject if civil lawsuit was filed pro per.",
+        "Reject false arrest claims (firm does not accept)."
+      ],
+      "questions": [
+        "Reason for police encounter and arrest; charges and status.",
+        "Department, officer(s), badge numbers, report number; did you receive a copy?",
+        "Criminal attorney name and contact; court and case number.",
+        "Force used (physical, taser, baton, pepper spray, firearm).",
+        "Injuries and medical treatment; photos of injuries.",
+        "Complaints filed to department or other agencies; copies/confirmations."
+      ],
+      "collect_profile_and_work": true
+    }
+  },
+  "scripts": {
+    "usps_advisory": "USPS matters involve special federal rules. I’ll flag this for attorney review. I’ll continue with the basics so the attorney has what they need.",
+    "false_arrest_reject": "I understand what you’re describing. Unfortunately, our firm cannot assist with false arrest claims. I’ll make sure your concern is noted, but we cannot move forward with intake.",
+    "empathetic_reject_generic": "I’m sorry for what you’re experiencing. Based on the information provided, our firm cannot proceed. I encourage you to seek a consultation with another attorney as soon as possible."
+  },
+  "output_contract": {
+    "status": ["REJECT","DEFER","ESCALATE","SCHEDULE_CONSULT"],
+    "reason_codes": [
+      "BEYOND_SOL",
+      "CRIMINAL_CASE_PENDING",
+      "PLEA_OR_CONVICTION_BARS_CLAIM",
+      "USPS_SPECIAL_HANDLING",
+      "INSUFFICIENT_FACTS",
+      "WITHIN_SOL_AND_FACTS_ALIGNED",
+      "FALSE_ARREST_POLICY"
+    ],
+    "deliverables": [
+      "Structured JSON payload of all collected fields",
+      "Transcribed call summary with scenario classification",
+      "Urgency index (1–5) with rationale",
+      "SOL calculator output (deadline, days_remaining, within_window)",
+      "Natural-language summary for attorney (human readable)"
+    ],
+    "natural_language_summary_template": "Matter Type: {{scenario}}. Incident on {{date_of_incident}} at {{location}}. Key facts: {{description}}. Injuries: {{injuries}}. Evidence: police_report={{police_report}}, photos_or_video={{photos_or_video}}, medical_records={{records_possession}}. SOL: deadline={{sol_deadline_iso}}, days_remaining={{days_remaining}}, within_window={{within_window_boolean}}. Urgency Index: {{urgency_index}} ({{urgency_rationale}}). Recommended Next Step: {{next_action}}."
+  }
+}
+
+
